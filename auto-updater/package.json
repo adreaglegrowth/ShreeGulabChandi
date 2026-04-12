@@ -1,0 +1,12 @@
+{
+  "name": "sgc-auto-price-updater",
+  "version": "1.0.0",
+  "description": "Auto silver price updater for Shree Gulab Chandi Shopify store",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
