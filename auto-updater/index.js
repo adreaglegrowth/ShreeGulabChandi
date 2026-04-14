@@ -49,10 +49,10 @@ function calcSilverMetafieldPrice(livePriceInrPerGram) {
 }
 
 // variant_price = (silver_price_per_gram + 35) × weight_g × 1.03 (3% tax)
-// rounded UP to nearest ₹10
+// rounded UP to nearest ₹100  (e.g. 323 → 400, 367 → 400, 401 → 500)
 function calcVariantPrice(weightG, silverPricePerG) {
   const raw = (silverPricePerG + 35) * weightG * 1.03;
-  return Math.ceil(raw / 10) * 10;
+  return Math.ceil(raw / 100) * 100;
 }
 
 // ── Generic HTTPS GET (with optional headers) ────────────────
