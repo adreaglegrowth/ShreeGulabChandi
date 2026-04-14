@@ -2,16 +2,16 @@
  * SGC Auto Price Updater
  * ─────────────────────────────────────────────────────────────────
  * What this does (every X hours):
- *   1. Fetches live silver spot price (USD/troy oz) from metals.live
- *   2. Converts to INR/gram using live forex rate
- *   3. Applies 1.05 buffer → ceil → stores as shop metafield silver_price
- *   4. Updates every variant price using:
- *        price = CEIL_10( silver_weight_g × silver_price × 1.40 )
+ *   1. Fetches live silver spot price (INR/toz) from metals.dev
+ *   2. Converts to INR/gram and adds 9% margin → stored as shop
+ *      metafield "silver_price"
+ *   3. Updates every variant price using:
+ *        price = CEIL_10( (silver_price_per_gram + 35) × weight_g × 1.03 )
  *      Fallback ₹5000 if variant has no silver_weight set
  *
- * Formula note:
- *   1.05 is applied ONCE when storing silver_price (step 3)
- *   1.40 is the retail margin applied per variant (step 4)
+ * Formula:
+ *   new_per_gram = (live_inr_per_toz / 31.1035) × 1.09
+ *   variant_price = (new_per_gram + 35) × silver_weight_g × 1.03
  * ─────────────────────────────────────────────────────────────────
  */
 
@@ -21,10 +21,11 @@ const https = require('https');
 //  CONFIG — set these as environment variables on Railway
 //  (or in .env file for local testing)
 // ═══════════════════════════════════════════════════════════
-const SHOP_DOMAIN   = process.env.SHOP_DOMAIN;
-const CLIENT_ID     = process.env.CLIENT_ID;
-const CLIENT_SECRET = process.env.CLIENT_SECRET;
-const INTERVAL_HOURS = parseFloat(process.env.INTERVAL_HOURS || '1');
+const SHOP_DOMAIN      = process.env.SHOP_DOMAIN;
+const CLIENT_ID        = process.env.CLIENT_ID;
+const CLIENT_SECRET    = process.env.CLIENT_SECRET;
+const METALS_API_KEY   = process.env.METALS_API_KEY;
+const INTERVAL_HOURS   = parseFloat(process.env.INTERVAL_HOURS || '1');
 // ═══════════════════════════════════════════════════════════
 
 const API_VERSION    = '2024-04';
@@ -33,34 +34,45 @@ const TROY_OZ_TO_G   = 31.1035; // 1 troy oz = 31.1035 grams
 
 // ── Validate config ──────────────────────────────────────────
 function validateConfig() {
-  const missing = ['SHOP_DOMAIN', 'CLIENT_ID', 'CLIENT_SECRET'].filter(k => !process.env[k]);
+  const missing = ['SHOP_DOMAIN', 'CLIENT_ID', 'CLIENT_SECRET', 'METALS_API_KEY']
+    .filter(k => !process.env[k]);
   if (missing.length) {
     throw new Error(`Missing environment variables: ${missing.join(', ')}\nCheck your Railway environment settings.`);
   }
 }
 
-// ── Formula ──────────────────────────────────────────────────
+// ── Price formulas ───────────────────────────────────────────
+
+// new_per_gram = live_inr_per_gram × 1.09  (9% added)
+function calcSilverMetafieldPrice(livePriceInrPerGram) {
+  return livePriceInrPerGram * 1.09;
+}
+
+// variant_price = (silver_price_per_gram + 35) × weight_g × 1.03 (3% tax)
+// rounded UP to nearest ₹10
 function calcVariantPrice(weightG, silverPricePerG) {
-  const raw = weightG * silverPricePerG * 1.40;
-  return Math.ceil(raw / 10) * 10; // round UP to nearest ₹10
+  const raw = (silverPricePerG + 35) * weightG * 1.03;
+  return Math.ceil(raw / 10) * 10;
 }
 
-function calcSilverMetafieldPrice(livePriceInr) {
-  // Apply 1.05 buffer and ceil to nearest rupee
-  return Math.ceil(livePriceInr * 1.05);
-}
-
-// ── Generic HTTPS GET ────────────────────────────────────────
-function httpsGet(url) {
+// ── Generic HTTPS GET (with optional headers) ────────────────
+function httpsGet(reqUrl, headers = {}) {
   return new Promise((resolve, reject) => {
-    https.get(url, (res) => {
+    const parsed = new URL(reqUrl);
+    const options = {
+      hostname: parsed.hostname,
+      path:     parsed.pathname + parsed.search,
+      method:   'GET',
+      headers:  { 'Accept': 'application/json', ...headers },
+    };
+    https.request(options, (res) => {
       let raw = '';
       res.on('data', chunk => raw += chunk);
       res.on('end', () => {
         try { resolve({ status: res.statusCode, body: JSON.parse(raw) }); }
         catch { resolve({ status: res.statusCode, body: raw }); }
       });
-    }).on('error', reject);
+    }).on('error', reject).end();
   });
 }
 
@@ -140,30 +152,25 @@ function log(msg) {
 
 // ── Step 1: Fetch live silver price in INR/gram ──────────────
 async function fetchLiveSilverPriceINR() {
-  // Get silver spot price in USD per troy oz
-  const silverRes = await httpsGet('https://api.metals.live/v1/spot/silver');
-  if (silverRes.status !== 200) throw new Error(`metals.live API failed (${silverRes.status})`);
+  const apiUrl = `https://api.metals.dev/v1/latest?api_key=${METALS_API_KEY}&currency=INR&unit=toz`;
+  const res = await httpsGet(apiUrl);
 
-  const usdPerTroyOz = parseFloat(silverRes.body.price || silverRes.body);
-  if (isNaN(usdPerTroyOz)) throw new Error(`Invalid silver price from API: ${JSON.stringify(silverRes.body)}`);
+  if (res.status !== 200 || !res.body || res.body.status !== 'success') {
+    throw new Error(`metals.dev API failed (${res.status}): ${JSON.stringify(res.body)}`);
+  }
 
-  // Get USD → INR rate
-  const forexRes = await httpsGet('https://api.exchangerate-api.com/v4/latest/USD');
-  if (forexRes.status !== 200) throw new Error(`Forex API failed (${forexRes.status})`);
+  const inrPerTroyOz = parseFloat(res.body.metals && res.body.metals.silver);
+  if (isNaN(inrPerTroyOz) || inrPerTroyOz <= 0) {
+    throw new Error(`Invalid silver price from metals.dev: ${JSON.stringify(res.body.metals)}`);
+  }
 
-  const usdToInr = forexRes.body.rates && forexRes.body.rates.INR;
-  if (!usdToInr) throw new Error(`INR rate missing from forex API`);
-
-  const inrPerTroyOz = usdPerTroyOz * usdToInr;
-  const inrPerGram   = inrPerTroyOz / TROY_OZ_TO_G;
-
-  log(`💹 Live silver: $${usdPerTroyOz.toFixed(3)}/oz | ₹${inrPerTroyOz.toFixed(2)}/oz | ₹${inrPerGram.toFixed(2)}/gram`);
+  const inrPerGram = inrPerTroyOz / TROY_OZ_TO_G;
+  log(`💹 Live silver: ₹${inrPerTroyOz.toFixed(2)}/toz | ₹${inrPerGram.toFixed(4)}/gram`);
   return inrPerGram;
 }
 
 // ── Step 2: Update silver_price shop metafield ───────────────
 async function updateSilverMetafield(newPrice) {
-  // First find existing metafield ID
   const res = await shopifyRequest('GET', '/metafields.json?namespace=custom&key=silver_price');
   const existing = (res.body.metafields || []).find(
     m => m.namespace === 'custom' && m.key === 'silver_price'
@@ -173,22 +180,20 @@ async function updateSilverMetafield(newPrice) {
     metafield: {
       namespace: 'custom',
       key:       'silver_price',
-      value:     String(newPrice),
+      value:     String(newPrice.toFixed(4)),
       type:      'number_decimal',
     },
   };
 
   if (existing) {
-    // Update
     const upd = await shopifyRequest('PUT', `/metafields/${existing.id}.json`, payload);
     if (upd.status !== 200) throw new Error(`Metafield update failed (${upd.status})`);
   } else {
-    // Create first time
     const crt = await shopifyRequest('POST', '/metafields.json', payload);
     if (crt.status !== 201) throw new Error(`Metafield create failed (${crt.status})`);
   }
 
-  log(`✅ Shop metafield silver_price updated → ₹${newPrice}/gram`);
+  log(`✅ Shop metafield silver_price updated → ₹${newPrice.toFixed(4)}/gram`);
 }
 
 // ── Step 3: Fetch all products ───────────────────────────────
@@ -234,18 +239,20 @@ async function runUpdateCycle() {
   log('🔄 Starting price update cycle...');
 
   try {
-    // Refresh token (valid 24h but refresh every cycle to be safe)
+    // Refresh token each cycle
     ACCESS_TOKEN = await fetchAccessToken();
 
-    // 1. Live silver price
-    const livePriceInr   = await fetchLiveSilverPriceINR();
-    const silverPrice    = calcSilverMetafieldPrice(livePriceInr);
-    log(`📐 After 1.05 buffer + ceil: ₹${silverPrice}/gram`);
+    // 1. Live silver price from metals.dev (INR/gram)
+    const livePriceInrPerGram = await fetchLiveSilverPriceINR();
 
-    // 2. Update shop metafield
+    // 2. Apply 9% margin → new per gram price
+    const silverPrice = calcSilverMetafieldPrice(livePriceInrPerGram);
+    log(`📐 After 9% margin: ₹${silverPrice.toFixed(4)}/gram`);
+
+    // 3. Update shop metafield
     await updateSilverMetafield(silverPrice);
 
-    // 3. Get all products
+    // 4. Get all products
     const products = await getAllProducts();
     log(`📦 ${products.length} products found`);
 
@@ -263,6 +270,7 @@ async function runUpdateCycle() {
         } else {
           newPrice = calcVariantPrice(weightG, silverPrice);
           updated++;
+          log(`   ${product.title} [${variant.title}] | ${weightG}g → ₹${newPrice}`);
         }
 
         const ok = await updateVariantPrice(variant.id, newPrice);
@@ -290,7 +298,7 @@ validateConfig();
 log('🚀 SGC Auto Price Updater started');
 log(`   Shop     : ${SHOP_DOMAIN}`);
 log(`   Interval : every ${INTERVAL_HOURS} hour(s)`);
-log(`   Formula  : weight × silver_price(1.05 applied) × 1.40`);
+log(`   Formula  : (silver_price/g + ₹35) × weight × 1.03  |  silver_price = live×1.09`);
 
 // Run immediately, then on interval
 runUpdateCycle();
