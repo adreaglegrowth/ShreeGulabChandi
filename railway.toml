@@ -1,6 +1,7 @@
 [build]
 builder = "nixpacks"
+rootDirectory = "auto-updater"
 
 [deploy]
-startCommand = "node auto-updater/index.js"
+startCommand = "node index.js"
 restartPolicyType = "always"
