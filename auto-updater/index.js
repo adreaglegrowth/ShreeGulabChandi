@@ -165,7 +165,8 @@ async function fetchLiveSilverPriceINR() {
   }
 
   const inrPerGram = inrPerTroyOz / TROY_OZ_TO_G;
-  log(`💹 Live silver: ₹${inrPerTroyOz.toFixed(2)}/toz | ₹${inrPerGram.toFixed(4)}/gram`);
+  log(`🌐 metals.dev API response → silver: ₹${inrPerTroyOz.toFixed(2)} per troy oz (INR/toz)`);
+  log(`📏 Converted to grams     → ₹${inrPerTroyOz.toFixed(2)} ÷ 31.1035 = ₹${inrPerGram.toFixed(4)} per gram`);
   return inrPerGram;
 }
 
@@ -247,7 +248,7 @@ async function runUpdateCycle() {
 
     // 2. Apply 9% margin → new per gram price
     const silverPrice = calcSilverMetafieldPrice(livePriceInrPerGram);
-    log(`📐 After 9% margin: ₹${silverPrice.toFixed(4)}/gram`);
+    log(`💹 After 9% margin        → ₹${livePriceInrPerGram.toFixed(4)} × 1.09 = ₹${silverPrice.toFixed(4)} per gram`);
 
     // 3. Update shop metafield
     await updateSilverMetafield(silverPrice);
@@ -270,7 +271,7 @@ async function runUpdateCycle() {
         } else {
           newPrice = calcVariantPrice(weightG, silverPrice);
           updated++;
-          log(`   ${product.title} [${variant.title}] | ${weightG}g → ₹${newPrice}`);
+          log(`   📦 ${product.title} [${variant.title}] | weight: ${weightG}g | (₹${silverPrice.toFixed(2)}+35) × ${weightG} × 1.03 = ₹${newPrice}`);
         }
 
         const ok = await updateVariantPrice(variant.id, newPrice);
